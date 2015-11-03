@@ -12,24 +12,26 @@
 #===============================================================================
 # VARIABLES
 #===============================================================================
-IDLIST=""
-PROJECTLIST=""
-
 # Readonly variables
 declare -r NODE=`hostname -s`
-declare -r BACKUP_NODE="rundeck-backup-machine"
+declare -r BACKUP_NODE="backup_node"
 declare -r RUNDECK_BACKUP_DIR="/opt/backup/${NODE}/projects"
 declare -r RUNDECK_IMPORT_DIR="/opt/backup/${BACKUP_NODE}/projects"
 declare -r RETENTION=5
-declare -r TOKEN="abcdefg1234567"
+declare -r TOKEN="abcde12345"
 declare -r PURGED=0
 declare -r VIP_LOCATION=`/usr/sbin/crm resource status VIP_ha1-rundeck`
+
+
+IDLIST=""
+PROJECTLIST=""
+URL_BASE="http://${NODE}:4440/api/"
 
 #===============================================================================
 # FUNCTIONS
 #===============================================================================
 function usage() {
-  echo
+	echo
         echo "USAGE: ${0} [OPTIONS]"
         echo
         echo "valid OPTIONS are ..."
@@ -43,6 +45,12 @@ function usage() {
 }
 
 function prepare {
+
+  if [ "$(id -u)" -ne "0" ]; then
+    echo "This script must be run as root."
+    exit 2
+  fi
+
   if ! `dpkg-query -l xmlstarlet > /dev/null`;then
     echo "-----> xmlstarlet is a required package and not installed. Installation in progress"
     apt-get install xmlstarlet > /dev/null
@@ -54,10 +62,10 @@ function prepare {
 
 function get_job_id_list {
   PROJECT=$1
-  URL="http://${NODE}:4440/api/2/project/${PROJECT}/jobs"
-  CURL_OUT=$(mktemp "/tmp/curl.out.XXXXX")
+  local URL="${URL_BASE}2/project/${PROJECT}/jobs"
+  local CURL_OUT=$(mktemp "/tmp/curl.out.XXXXX")
 
-  curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -o $CURL_OUT -H "Content-Type: application/xml" -X POST "$URL"
+  curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -o $CURL_OUT -H "Content-Type: application/xml" -X GET "$URL"
   for ID in $(xmlstarlet sel -t -m "/result/jobs/job" -m "@id" -v . -n ${CURL_OUT})
   do
     if [ -z $IDLIST ] ; then
@@ -67,16 +75,20 @@ function get_job_id_list {
     fi
   done
   if [ ! -z $IDLIST ] ; then
+    # to count the number of id we get the number of comma +1
     count_idlist=`echo "${IDLIST}"| awk -F "," '{print NF-1}'`
+    let "count_idlist = count_idlist + 1"
   else
     count_idlist=0
   fi
-  echo "  ---> $count_idlist jobs found in project $PROJECT"
+  echo "  ---> ${count_idlist} jobs found in project $PROJECT"
+  rm $CURL_OUT
 }
 
 function get_project_name_list {
-  CURL_OUT=$(mktemp "/tmp/curl.out.XXXXX")
-  curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -o $CURL_OUT -H "Content-Type: application/xml" -X GET http://127.0.0.1:4440/api/12/projects
+  local URL="${URL_BASE}12/projects"
+  local CURL_OUT=$(mktemp "/tmp/curl.out.XXXXX")
+  curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -o $CURL_OUT -H "Content-Type: application/xml" -X GET "$URL"
 
   for project in $(xmlstarlet sel -t -m "/projects/project" -m "name" -v . -n ${CURL_OUT})
   do
@@ -86,16 +98,20 @@ function get_project_name_list {
       PROJECTLIST="${PROJECTLIST},${project}"
     fi
   done
+  rm $CURL_OUT
 }
 
 function delete_jobs_in_project {
   PROJECT=$1
-  CURL_OUT=$(mktemp "/tmp/curl.out.XXXXX")
+  local URL="${URL_BASE}5/jobs/delete"
+  local CURL_OUT=$(mktemp "/tmp/curl.out.XXXXX")
+
+
   if grep -- "$PROJECT" <<< "$PROJECTLIST">/dev/null; then
     get_job_id_list $PROJECT
     if [ ! -z $IDLIST ] ; then
       echo "  ---> Removing jobs from project $PROJECT"
-      curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -H "Content-Type: application/xml" -o $CURL_OUT -X POST http://127.0.0.1:4440/api/12/jobs/delete?idlist=$IDLIST
+      curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -X POST "$URL?idlist=$IDLIST" -o $CURL_OUT
       xmlstarlet val -q $CURL_OUT
 
       if ! xmlstarlet sel -T -t -v "/result/@success" $CURL_OUT >/dev/null
@@ -106,14 +122,16 @@ function delete_jobs_in_project {
       fi
 
       declare -i successful failed
-      successful=$(xmlstarlet sel -t -m "/result/takeoverSchedule/jobs/successful" -v @count $CURL_OUT)
-      failed=$(xmlstarlet sel -t -m "/result/takeoverSchedule/jobs/failed" -v @count $CURL_OUT)
+      successful=$(xmlstarlet sel -t -m "/result/deleteJobs/succeeded" -v @count $CURL_OUT)
+      failed=$(xmlstarlet sel -t -m "/result/deleteJobs/failed" -v @count $CURL_OUT)
       if [ "$failed" -ne 0 ]
       then
-        echo "Not all jobs taken over: $failed out of $((successful+failed))"
+        echo "  ---> Some jobs failed: $failed out of $((successful+failed))"
       else
-        echo "Took over schedule for $successful jobs"
+        echo "  ---> $successful jobs successfully removed"
       fi
+    else
+      echo "  ---> Skipping"
     fi
   else
     echo "  ---> ${PROJECT} is not present in Rundeck"
@@ -131,7 +149,7 @@ function delete_jobs_in_all_projects {
 }
 
 function import_all {
-  if [[ "$VIP_LOCATION" != *"$LOCALHOST"* ]]; then
+  if [[ "$VIP_LOCATION" != *"$NODE"* ]]; then
     cd ${RUNDECK_IMPORT_DIR}
     for project in $PROJECTLIST
     do
@@ -141,7 +159,7 @@ function import_all {
       echo "Import project : ${project}"
       if [ ! -z $LAST_VERSION ];then
         echo "Version to import : $LAST_VERSION"
-        curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -X PUT "http://127.0.0.1:4440/api/13/project/${project#*/}/import" --upload-file ${LAST_VERSION} -H "Content-Type:application/zip"
+        curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -X PUT "${URL_BASE}11/project/${project#*/}/import" --upload-file ${LAST_VERSION} -H "Content-Type:application/zip"
         find /tmp/ -name "ziprea*" -delete
         sleep 30
       fi
@@ -149,6 +167,20 @@ function import_all {
   else
     echo "The VIP is hold by this server, import is not recommended. This message is here to warn you that forcing may result in data loss."
   fi
+}
+
+function export_all {
+  #if [[ "$VIP_LOCATION" == *"$NODE"* ]]; then
+    get_project_name_list
+    for project in $(echo $PROJECTLIST | tr "," " ")
+    do
+      echo "Project to export : ${project}"
+      curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -X GET "${URL_BASE}12/project/${project}/export" > ${RUNDECK_BACKUP_DIR}/${project}-`date +%Y%m%d`.jar
+      sleep 5
+    done
+  #else
+  #  echo "The VIP is hold by this server, export is not recommended."
+  #fi
 }
 
 #===============================================================================
@@ -160,22 +192,24 @@ date
 while getopts ":lxid:" OPTION
 do
   case ${OPTION} in
-    x) echo "-----> Exporting all jobs for all projects"
+    x) echo "-----> Preparing"
        prepare
+       echo "-----> Exporting all jobs for all projects"
        export_all
        exit 0 ;;
-     
-    i) echo "-----> Preparing for the job"
+		 
+    i) echo "-----> Preparing"
        prepare
        echo "-----> Clearing jobs from all projects"
        delete_jobs_in_all_projects
        echo "-----> Importing all jobs for all projects"
        import_all
        exit 0 ;;
-     
-    d) echo "-----> Removing all jobs in project ${OPTARG}"
+		 
+    d) echo "-----> Preparing"
        prepare
        get_project_name_list
+       echo "-----> Removing all jobs in project ${OPTARG}"
        delete_jobs_in_project ${OPTARG}
        exit 0 ;;
 
@@ -185,15 +219,14 @@ do
          echo $word
        done
        exit 0 ;;
-     
+		 
     h) usage ;;
     *) usage ;;
   esac
 done
 shift $((OPTIND -1))
 
-# Si il n'y a pas d'option lors de l'appel
+# if there is no option specified at all
 if [ $OPTIND -eq 1 ]; then
-  usage
+	usage
 fi
-
