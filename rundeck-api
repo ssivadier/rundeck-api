@@ -24,6 +24,7 @@ declare -r VIP_LOCATION=`/usr/sbin/crm resource status VIP_ha1-rundeck`
 
 
 IDLIST=""
+JOBLIST=""
 PROJECTLIST=""
 URL_BASE="http://${NODE}:4440/api/"
 
@@ -35,10 +36,11 @@ function usage() {
         echo "USAGE: ${0} [OPTIONS]"
         echo
         echo "valid OPTIONS are ..."
-        echo "-x Export all content in a project"
+        echo "-x Export all content of a project"
         echo "-i Import all content in a project"
         echo "-d Delete all jobs in a project"
-        echo "-l List all projects"
+        echo "-p List all projects"
+        echo "-j List all jobs for a specified project"
         echo "-h Display this text and exit"
         echo
         exit 1
@@ -63,17 +65,9 @@ function prepare {
 function get_job_id_list {
   PROJECT=$1
   local URL="${URL_BASE}2/project/${PROJECT}/jobs"
-  local CURL_OUT=$(mktemp "/tmp/curl.out.XXXXX")
 
-  curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -o $CURL_OUT -H "Content-Type: application/xml" -X GET "$URL"
-  for ID in $(xmlstarlet sel -t -m "/result/jobs/job" -m "@id" -v . -n ${CURL_OUT})
-  do
-    if [ -z $IDLIST ] ; then
-      IDLIST=$ID
-    else
-      IDLIST="${IDLIST},${ID}"
-    fi
-  done
+  IDLIST=`curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -X GET "$URL" | xmlstarlet sel -t -v "//job/@id" | tr "\\n" "," | sed 's/,$//'`
+
   if [ ! -z $IDLIST ] ; then
     # to count the number of id we get the number of comma +1
     count_idlist=`echo "${IDLIST}"| awk -F "," '{print NF-1}'`
@@ -82,23 +76,18 @@ function get_job_id_list {
     count_idlist=0
   fi
   echo "  ---> ${count_idlist} jobs found in project $PROJECT"
-  rm $CURL_OUT
 }
 
-function get_project_name_list {
-  local URL="${URL_BASE}12/projects"
-  local CURL_OUT=$(mktemp "/tmp/curl.out.XXXXX")
-  curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -o $CURL_OUT -H "Content-Type: application/xml" -X GET "$URL"
+function get_job_list {
+  PROJECT=$1
+  local URL="${URL_BASE}2/project/${PROJECT}/jobs"
+  JOBLIST=`curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -X GET "$URL" | xmlstarlet sel -t -m "/result/jobs/job" -v @id -o "," -v "name" -o "," -v "group" -o "\n"`
+}
 
-  for project in $(xmlstarlet sel -t -m "/projects/project" -m "name" -v . -n ${CURL_OUT})
-  do
-    if [ -z $PROJECTLIST ] ; then
-      PROJECTLIST=$project
-    else
-      PROJECTLIST="${PROJECTLIST},${project}"
-    fi
-  done
-  rm $CURL_OUT
+
+function get_project_name_list {
+  local URL="${URL_BASE}1/projects"
+  PROJECTLIST=`curl -sS -H "X-RunDeck-Auth-Token:$TOKEN" -X GET "$URL" | xmlstarlet sel -t -v "//name/text()" | tr "\\n" "," | sed 's/,$//'`
 }
 
 function delete_jobs_in_project {
@@ -189,7 +178,7 @@ function export_all {
 date
 
 # parse the command line options given to this script
-while getopts ":lxid:" OPTION
+while getopts ":pxid:j:" OPTION
 do
   case ${OPTION} in
     x) echo "-----> Preparing"
@@ -213,11 +202,14 @@ do
        delete_jobs_in_project ${OPTARG}
        exit 0 ;;
 
-    l) echo "-----> Listing all projects"
+    p) echo "-----> Listing all projects"
        get_project_name_list
-       echo $PROJECTLIST | sed -n 1'p' | tr ',' '\n' | while read word; do
-         echo $word
-       done
+       echo $PROJECTLIST | column -s, -t 
+       exit 0 ;;
+    
+    j) echo "-----> Listing jobs for the project ${OPTARG}"
+       get_job_list ${OPTARG}
+       printf "id,name,group\n$JOBLIST" | column -s, -t
        exit 0 ;;
 		 
     h) usage ;;
