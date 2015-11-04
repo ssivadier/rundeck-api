@@ -2,6 +2,7 @@
 
 This script allows you to:
 - list projects
+- list all jobs in a project (id, name and group)
 - remove all jobs from a project
 - export all jobs and history(activity) from a project
 - import all of this back in
